@@ -1,36 +1,27 @@
 import os
-import logging
 from enum import Enum
 
-from flask import Flask, jsonify, render_template, request
+import uvicorn
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse
+from starlette.routing import Route
 from pyre_extensions import none_throws
-from waitress import serve
-from whitenoise import WhiteNoise
 
 from mariner.config import FILES_DIRECTORY
 from mariner.file_formats.ctb import CTBFile
 from mariner.mars import ElegooMars, PrinterState
 
 
-frontend_dist_directory: str = os.path.abspath("./frontend/dist/")
-app = Flask(
-    __name__,
-    template_folder=frontend_dist_directory,
-    static_folder=frontend_dist_directory,
-)
-# pyre-ignore[8]: incompatible attribute type
-app.wsgi_app = WhiteNoise(app.wsgi_app)
-# pyre-ignore[16]: undefined attribute
-app.wsgi_app.add_files(frontend_dist_directory)
+async def index(request: Request) -> FileResponse:
+    return FileResponse("./frontend/dist/index.html")
 
 
-@app.route("/", methods=["GET"])
-def index() -> str:
-    return render_template("index.html")
+async def js(request: Request) -> FileResponse:
+    return FileResponse("./frontend/dist/main.js")
 
 
-@app.route("/api/print_status", methods=["GET"])
-def print_status() -> str:
+async def print_status(request: Request) -> JSONResponse:
     with ElegooMars() as elegoo_mars:
         selected_file = elegoo_mars.get_selected_file()
         print_status = elegoo_mars.get_print_status()
@@ -61,7 +52,7 @@ def print_status() -> str:
                 / none_throws(print_status.total_bytes)
             )
 
-        return jsonify(
+        return JSONResponse(
             {
                 "state": print_status.state.value,
                 "selected_file": selected_file,
@@ -71,8 +62,7 @@ def print_status() -> str:
         )
 
 
-@app.route("/api/list_files", methods=["GET"])
-def list_files() -> str:
+async def list_files(request: Request) -> JSONResponse:
     filename_list = os.listdir(FILES_DIRECTORY)
     files = []
     for filename in filename_list:
@@ -83,7 +73,7 @@ def list_files() -> str:
                 "print_time_secs": ctb_file.print_time_secs,
             }
         )
-    return jsonify(
+    return JSONResponse(
         {
             "files": files,
         }
@@ -98,13 +88,12 @@ class PrinterCommand(Enum):
     REBOOT = "reboot"
 
 
-@app.route("/api/printer/command/<command>", methods=["POST"])
-def printer_command(command: str) -> str:
-    printer_command = PrinterCommand(command)
+def printer_command(request: Request) -> JSONResponse:
+    printer_command = PrinterCommand(request.path_params["command"])
     with ElegooMars() as elegoo_mars:
         if printer_command == PrinterCommand.START_PRINT:
             # TODO: validate filename before sending it to the printer
-            filename = str(request.args.get("filename"))
+            filename = str(request.query_params.get("filename"))
             elegoo_mars.start_printing(filename)
         elif printer_command == PrinterCommand.PAUSE_PRINT:
             elegoo_mars.pause_printing()
@@ -114,10 +103,20 @@ def printer_command(command: str) -> str:
             elegoo_mars.stop_printing()
         elif printer_command == PrinterCommand.REBOOT:
             elegoo_mars.reboot()
-        return jsonify({"success": True})
+        return JSONResponse({"success": True})
+
+
+app = Starlette(
+    debug=True,
+    routes=[
+        Route("/", index, methods=["GET"]),
+        Route("/main.js", js, methods=["GET"]),
+        Route("/api/print_status", print_status, methods=["GET"]),
+        Route("/api/list_files", list_files, methods=["GET"]),
+        Route("/api/printer/command/{command:str}", printer_command, methods=["POST"]),
+    ],
+)
 
 
 def main() -> None:
-    logger = logging.getLogger("waitress")
-    logger.setLevel(logging.INFO)
-    serve(app, host="0.0.0.0", port=5000)
+    uvicorn.run("mariner.server:app", host="0.0.0.0", port=5000, log_level="info")

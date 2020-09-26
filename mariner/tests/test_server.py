@@ -2,6 +2,7 @@ from unittest import TestCase
 from unittest.mock import patch, MagicMock, Mock
 
 from pyexpect import expect
+from starlette.testclient import TestClient
 
 from mariner.file_formats.ctb import CTBFile
 from mariner.mars import ElegooMars, PrinterState, PrintStatus
@@ -10,7 +11,7 @@ from mariner.server import app
 
 class MarinerServerTest(TestCase):
     def setUp(self) -> None:
-        self.client = app.test_client()
+        self.client = TestClient(app)
 
         self.printer_mock = Mock(spec=ElegooMars)
         self.printer_patcher = patch("mariner.server.ElegooMars")
@@ -41,7 +42,7 @@ class MarinerServerTest(TestCase):
             total_bytes=120,
         )
         response = self.client.get("/api/print_status")
-        expect(response.get_json()).to_equal(
+        expect(response.json()).to_equal(
             {
                 "state": "PRINTING",
                 "selected_file": "foobar.ctb",
@@ -60,7 +61,7 @@ class MarinerServerTest(TestCase):
             total_bytes=120,
         )
         response = self.client.get("/api/print_status")
-        expect(response.get_json()).to_equal(
+        expect(response.json()).to_equal(
             {
                 "state": "PAUSED",
                 "selected_file": "foobar.ctb",
@@ -79,7 +80,7 @@ class MarinerServerTest(TestCase):
             total_bytes=120,
         )
         response = self.client.get("/api/print_status")
-        expect(response.get_json()).to_equal(
+        expect(response.json()).to_equal(
             {
                 "state": "STARTING_PRINT",
                 "selected_file": "foobar.ctb",
@@ -98,7 +99,7 @@ class MarinerServerTest(TestCase):
             total_bytes=0,
         )
         response = self.client.get("/api/print_status")
-        expect(response.get_json()).to_equal(
+        expect(response.json()).to_equal(
             {
                 "state": "IDLE",
                 "selected_file": "foobar.ctb",
@@ -109,7 +110,7 @@ class MarinerServerTest(TestCase):
     @patch("mariner.server.os.listdir", return_value=["a.ctb", "b.ctb"])
     def test_list_files(self, _list_dir_mock: MagicMock) -> None:
         response = self.client.get("/api/list_files")
-        expect(response.get_json()).to_equal(
+        expect(response.json()).to_equal(
             {
                 "files": [
                     {"filename": "a.ctb", "print_time_secs": 200},
@@ -122,25 +123,25 @@ class MarinerServerTest(TestCase):
         response = self.client.post(
             "/api/printer/command/start_print?filename=foobar.ctb"
         )
-        expect(response.get_json()).to_equal({"success": True})
+        expect(response.json()).to_equal({"success": True})
         self.printer_mock.start_printing.assert_called_once_with("foobar.ctb")
 
     def test_command_pause_print(self) -> None:
         response = self.client.post("/api/printer/command/pause_print")
-        expect(response.get_json()).to_equal({"success": True})
+        expect(response.json()).to_equal({"success": True})
         self.printer_mock.pause_printing.assert_called_once_with()
 
     def test_command_resume_print(self) -> None:
         response = self.client.post("/api/printer/command/resume_print")
-        expect(response.get_json()).to_equal({"success": True})
+        expect(response.json()).to_equal({"success": True})
         self.printer_mock.resume_printing.assert_called_once_with()
 
     def test_command_cancel_print(self) -> None:
         response = self.client.post("/api/printer/command/cancel_print")
-        expect(response.get_json()).to_equal({"success": True})
+        expect(response.json()).to_equal({"success": True})
         self.printer_mock.stop_printing.assert_called_once_with()
 
     def test_command_reboot(self) -> None:
         response = self.client.post("/api/printer/command/reboot")
-        expect(response.get_json()).to_equal({"success": True})
+        expect(response.json()).to_equal({"success": True})
         self.printer_mock.reboot.assert_called_once_with()
