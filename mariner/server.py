@@ -1,5 +1,7 @@
+import asyncio
 import os
 from enum import Enum
+from typing import Any, Dict
 
 import uvicorn
 from starlette.applications import Starlette
@@ -30,7 +32,7 @@ async def print_status(request: Request) -> JSONResponse:
             progress = 0.0
             print_details = {}
         else:
-            ctb_file = CTBFile.read(FILES_DIRECTORY / selected_file)
+            ctb_file = await CTBFile.read(FILES_DIRECTORY / selected_file)
 
             if print_status.current_byte == 0:
                 current_layer = 1
@@ -62,17 +64,19 @@ async def print_status(request: Request) -> JSONResponse:
         )
 
 
+async def _prepare_file_info(filename: str) -> Dict[str, Any]:
+    ctb_file = await CTBFile.read(FILES_DIRECTORY / filename)
+    return {
+        "filename": filename,
+        "print_time_secs": ctb_file.print_time_secs,
+    }
+
+
 async def list_files(request: Request) -> JSONResponse:
     filename_list = os.listdir(FILES_DIRECTORY)
-    files = []
-    for filename in filename_list:
-        ctb_file = CTBFile.read(FILES_DIRECTORY / filename)
-        files.append(
-            {
-                "filename": filename,
-                "print_time_secs": ctb_file.print_time_secs,
-            }
-        )
+    files = await asyncio.gather(
+        *[_prepare_file_info(filename) for filename in filename_list]
+    )
     return JSONResponse(
         {
             "files": files,

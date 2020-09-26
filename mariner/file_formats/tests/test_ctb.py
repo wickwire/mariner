@@ -7,9 +7,9 @@ from mariner.file_formats.ctb import CTBFile
 
 
 class CTBFileTest(TestCase):
-    def test_loading_ctb_file(self) -> None:
+    async def test_loading_ctb_file(self) -> None:
         path = pathlib.Path(__file__).parent.absolute() / "stairs.ctb"
-        ctb_file = CTBFile.read(path)
+        ctb_file = await CTBFile.read(path)
         expect(ctb_file.filename).to_equal("stairs.ctb")
         expect(ctb_file.height_mm).close_to(20.0, max_delta=1e-9)
         expect(ctb_file.layer_height).close_to(0.05, max_delta=1e-9)

@@ -2,6 +2,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Sequence
 
+import aiofiles
 from typedstruct import LittleEndianStruct, StructType
 
 
@@ -60,14 +61,16 @@ class CTBFile:
         self.end_byte_offset_by_layer = end_byte_offset_by_layer
 
     @classmethod
-    def read(self, path: pathlib.Path) -> "CTBFile":
-        with open(str(path), "rb") as file:
-            ctb_header = CTBHeader.unpack(file.read(CTBHeader.get_size()))
+    async def read(self, path: pathlib.Path) -> "CTBFile":
+        async with aiofiles.open(str(path), "rb") as file:
+            ctb_header = CTBHeader.unpack(await file.read(CTBHeader.get_size()))
 
             end_byte_offset_by_layer = []
             for layer in range(0, ctb_header.layer_count):
-                file.seek(ctb_header.layer_defs_offset + layer * CTBLayerDef.get_size())
-                layer_def = CTBLayerDef.unpack(file.read(CTBLayerDef.get_size()))
+                await file.seek(
+                    ctb_header.layer_defs_offset + layer * CTBLayerDef.get_size()
+                )
+                layer_def = CTBLayerDef.unpack(await file.read(CTBLayerDef.get_size()))
                 end_byte_offset_by_layer.append(
                     layer_def.image_offset + layer_def.image_length
                 )
