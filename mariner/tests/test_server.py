@@ -9,10 +9,10 @@ from pyexpect import expect
 from pyfakefs.fake_filesystem_unittest import TestCase
 from werkzeug.datastructures import FileStorage
 
-from mariner.config import FILES_DIRECTORY
+from mariner import config
 from mariner.exceptions import UnexpectedPrinterResponse
-from mariner.mars import (
-    ElegooMars,
+from mariner.printer import (
+    ChiTuPrinter,
     PrinterState,
     PrintStatus,
 )
@@ -30,16 +30,28 @@ class MarinerServerTest(TestCase):
         )
         with open(path, "rb") as file:
             self.ctb_file_contents = file.read()
+
+        forkpath = (
+            pathlib.Path(__file__)
+            .parent.parent.absolute()
+            .joinpath("file_formats", "tests", "._stairs.ctb")
+        )
+        with open(forkpath, "rb") as forkfile:
+            self.fork_file_contents = forkfile.read()
+
         self.setUpPyfakefs()
         self.fs.create_file(
             "/mnt/usb_share/foobar.ctb", contents=self.ctb_file_contents
+        )
+        self.fs.create_file(
+            "/mnt/usb_share/._foobar.ctb", contents=self.fork_file_contents
         )
 
         self.client = app.test_client()
         app.config["WTF_CSRF_ENABLED"] = False
 
-        self.printer_mock = Mock(spec=ElegooMars)
-        self.printer_patcher = patch("mariner.server.api.ElegooMars")
+        self.printer_mock = Mock(spec=ChiTuPrinter)
+        self.printer_patcher = patch("mariner.server.api.ChiTuPrinter")
         printer_constructor_mock = self.printer_patcher.start()
         printer_constructor_mock.return_value = self.printer_mock
         self.printer_mock.__enter__ = Mock(return_value=self.printer_mock)
@@ -143,6 +155,16 @@ class MarinerServerTest(TestCase):
             self.fs.create_file(
                 "/mnt/usb_share/random_file.txt", contents="dummy content"
             )
+        with freeze_time("2021-05-14"):
+            self.fs.create_file(
+                "/mnt/usb_share/README",
+                contents=self.ctb_file_contents,
+            )
+        with freeze_time("2021-05-15"):
+            self.fs.create_file(
+                "/mnt/usb_share/case.CtB",
+                contents=self.ctb_file_contents,
+            )
 
         response = self.client.get("/api/list_files")
         expect(response.get_json()).to_equal(
@@ -150,10 +172,26 @@ class MarinerServerTest(TestCase):
                 "directories": [{"dirname": "subdir"}],
                 "files": [
                     {
+                        "filename": "._foobar.ctb",
+                        "path": "._foobar.ctb",
+                        "can_be_printed": False,
+                    },
+                    {
                         "filename": "foobar.ctb",
                         "path": "foobar.ctb",
                         "print_time_secs": 5621,
                         "can_be_printed": True,
+                    },
+                    {
+                        "filename": "case.CtB",
+                        "path": "case.CtB",
+                        "print_time_secs": 5621,
+                        "can_be_printed": True,
+                    },
+                    {
+                        "filename": "README",
+                        "path": "README",
+                        "can_be_printed": False,
                     },
                     {
                         "filename": "b.ctb",
@@ -322,7 +360,19 @@ class MarinerServerTest(TestCase):
             response = self.client.post("/api/upload_file", data=data)
         expect(response.status_code).to_equal(200)
         expect(response.get_json()).to_equal({"success": True})
-        save_file_mock.assert_called_once_with(str(FILES_DIRECTORY / "myfile.ctb"))
+        save_file_mock.assert_called_once_with(
+            str(config.get_files_directory() / "myfile.ctb")
+        )
+
+    def test_upload_file_with_upper_case_extension(self) -> None:
+        data = {"file": (io.BytesIO(b"abcdef"), "myfile.CtB")}
+        with patch.object(FileStorage, "save") as save_file_mock:
+            response = self.client.post("/api/upload_file", data=data)
+        expect(response.status_code).to_equal(200)
+        expect(response.get_json()).to_equal({"success": True})
+        save_file_mock.assert_called_once_with(
+            str(config.get_files_directory() / "myfile.CtB")
+        )
 
     def test_upload_file_with_sanitized_file(self) -> None:
         data = {"file": (io.BytesIO(b"abcdef"), "../../../etc/passwd.ctb")}
@@ -330,19 +380,27 @@ class MarinerServerTest(TestCase):
             response = self.client.post("/api/upload_file", data=data)
         expect(response.status_code).to_equal(200)
         expect(response.get_json()).to_equal({"success": True})
-        save_file_mock.assert_called_once_with(str(FILES_DIRECTORY / "etc_passwd.ctb"))
+        save_file_mock.assert_called_once_with(
+            str(config.get_files_directory() / "etc_passwd.ctb")
+        )
 
     def test_delete_file(self) -> None:
-        expect(os.path.exists(FILES_DIRECTORY / "mariner.ctb")).to_equal(False)
+        expect(os.path.exists(config.get_files_directory() / "mariner.ctb")).to_equal(
+            False
+        )
         self.fs.create_file(
             "/mnt/usb_share/mariner.ctb", contents=self.ctb_file_contents
         )
-        expect(os.path.exists(FILES_DIRECTORY / "mariner.ctb")).to_equal(True)
+        expect(os.path.exists(config.get_files_directory() / "mariner.ctb")).to_equal(
+            True
+        )
 
         response = self.client.post("/api/delete_file?filename=mariner.ctb")
         expect(response.status_code).to_equal(200)
         expect(response.get_json()).to_equal({"success": True})
-        expect(os.path.exists(FILES_DIRECTORY / "mariner.ctb")).to_equal(False)
+        expect(os.path.exists(config.get_files_directory() / "mariner.ctb")).to_equal(
+            False
+        )
 
     def test_delete_file_that_is_not_file(self) -> None:
         with patch("os.remove") as remove_mock:
@@ -353,3 +411,14 @@ class MarinerServerTest(TestCase):
     def test_delete_file_with_invalid_path(self) -> None:
         response = self.client.post("/api/delete_file?filename=../../etc/passwd")
         expect(response.status_code).to_equal(400)
+
+    def test_get_index(self) -> None:
+        with patch(
+            "mariner.server.render_template", return_value=""
+        ) as render_template_mock:
+            response = self.client.get("/")
+            render_template_mock.assert_called_with(
+                "index.html",
+                supported_extensions=ANY,
+            )
+        expect(response.status_code).to_equal(200)

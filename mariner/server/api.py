@@ -14,12 +14,16 @@ from flask import (
 from pyre_extensions import none_throws
 from werkzeug.utils import secure_filename
 
-from mariner.config import FILES_DIRECTORY
-from mariner.exceptions import MarinerException
+from mariner import config
+from mariner.exceptions import MarinerException, UnexpectedPrinterResponse
 from mariner.file_formats import SlicedModelFile
-from mariner.file_formats.utils import get_supported_extensions
-from mariner.mars import ElegooMars, PrinterState
-from mariner.server.utils import read_cached_preview, read_cached_sliced_model_file
+from mariner.file_formats.utils import get_file_extension, get_supported_extensions
+from mariner.printer import ChiTuPrinter, PrinterState
+from mariner.server.utils import (
+    read_cached_preview,
+    read_cached_sliced_model_file,
+    retry,
+)
 
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -42,16 +46,28 @@ def handle_mariner_exception(exception: MarinerException) -> Tuple[str, int]:
 
 @api.route("/print_status", methods=["GET"])
 def print_status() -> str:
-    with ElegooMars() as elegoo_mars:
-        selected_file = elegoo_mars.get_selected_file()
-        print_status = elegoo_mars.get_print_status()
+    with ChiTuPrinter() as printer:
+        # the printer sends periodic "ok" responses over serial. this means that
+        # sometimes we get an unexpected response from the printer (an "ok" instead of
+        # the print status we expected). due to this, we retry at most 3 times here
+        # until we have a successful response. see issue #180
+        selected_file = retry(
+            printer.get_selected_file,
+            UnexpectedPrinterResponse,
+            num_retries=3,
+        )
+        print_status = retry(
+            printer.get_print_status,
+            UnexpectedPrinterResponse,
+            num_retries=3,
+        )
 
         if print_status.state == PrinterState.IDLE:
             progress = 0.0
             print_details = {}
         else:
             sliced_model_file = read_cached_sliced_model_file(
-                FILES_DIRECTORY / selected_file
+                config.get_files_directory() / selected_file
             )
 
             if print_status.current_byte == 0:
@@ -92,8 +108,11 @@ def print_status() -> str:
 @api.route("/list_files", methods=["GET"])
 def list_files() -> str:
     path_parameter = str(request.args.get("path", "."))
-    path = (FILES_DIRECTORY / path_parameter).resolve()
-    if FILES_DIRECTORY not in path.parents and path != FILES_DIRECTORY:
+    path = (config.get_files_directory() / path_parameter).resolve()
+    if (
+        config.get_files_directory() not in path.parents
+        and path != config.get_files_directory()
+    ):
         abort(400)
     with os.scandir(path) as dir_entries:
         files = []
@@ -103,14 +122,24 @@ def list_files() -> str:
         ):
             if dir_entry.is_file():
                 sliced_model_file: Optional[SlicedModelFile] = None
-                if dir_entry.name.endswith(tuple(get_supported_extensions())):
-                    sliced_model_file = read_cached_sliced_model_file(
-                        path / dir_entry.name
-                    )
+                if get_file_extension(dir_entry.name) in get_supported_extensions():
+                    if dir_entry.name.startswith("._"):
+                        if b"Mac OS X" not in open(dir_entry, "rb").read(32):
+                            sliced_model_file = read_cached_sliced_model_file(
+                                path / dir_entry.name
+                            )
+                    else:
+                        sliced_model_file = read_cached_sliced_model_file(
+                            path / dir_entry.name
+                        )
 
                 file_data: Dict[str, Any] = {
                     "filename": dir_entry.name,
-                    "path": str((path / dir_entry.name).relative_to(FILES_DIRECTORY)),
+                    "path": str(
+                        (path / dir_entry.name).relative_to(
+                            config.get_files_directory()
+                        )
+                    ),
                 }
 
                 if sliced_model_file:
@@ -139,8 +168,8 @@ def list_files() -> str:
 @api.route("/file_details", methods=["GET"])
 def file_details() -> str:
     filename = str(request.args.get("filename"))
-    path = (FILES_DIRECTORY / filename).resolve()
-    if FILES_DIRECTORY not in path.parents:
+    path = (config.get_files_directory() / filename).resolve()
+    if config.get_files_directory() not in path.parents:
         abort(400)
     sliced_model_file = read_cached_sliced_model_file(path)
     return jsonify(
@@ -162,10 +191,10 @@ def upload_file() -> str:
     file = request.files.get("file")
     if file is None or file.filename == "":
         abort(400)
-    if os.path.splitext(file.filename)[1] not in get_supported_extensions():
+    if get_file_extension(file.filename) not in get_supported_extensions():
         abort(400)
     filename = secure_filename(file.filename)
-    file.save(str(FILES_DIRECTORY / filename))
+    file.save(str(config.get_files_directory() / filename))
     os.sync()
     return jsonify({"success": True})
 
@@ -173,8 +202,8 @@ def upload_file() -> str:
 @api.route("/delete_file", methods=["POST"])
 def delete_file() -> str:
     filename = str(request.args.get("filename"))
-    path = (FILES_DIRECTORY / filename).resolve()
-    if FILES_DIRECTORY not in path.parents:
+    path = (config.get_files_directory() / filename).resolve()
+    if config.get_files_directory() not in path.parents:
         abort(400)
     # we use os.path.isfile instead of Path.is_file here because pyfakefs doesn't
     # seem to properly mock Path.is_file as of pyfakefs 4.4.0
@@ -187,8 +216,8 @@ def delete_file() -> str:
 @api.route("/file_preview", methods=["GET"])
 def file_preview() -> Response:
     filename = str(request.args.get("filename"))
-    path = (FILES_DIRECTORY / filename).resolve()
-    if FILES_DIRECTORY not in path.parents:
+    path = (config.get_files_directory() / filename).resolve()
+    if config.get_files_directory() not in path.parents:
         abort(400)
 
     preview_bytes = read_cached_preview(path)
@@ -213,17 +242,17 @@ class PrinterCommand(Enum):
 @api.route("/printer/command/<command>", methods=["POST"])
 def printer_command(command: str) -> str:
     printer_command = PrinterCommand(command)
-    with ElegooMars() as elegoo_mars:
+    with ChiTuPrinter() as printer:
         if printer_command == PrinterCommand.START_PRINT:
             # TODO: validate filename before sending it to the printer
             filename = str(request.args.get("filename"))
-            elegoo_mars.start_printing(filename)
+            printer.start_printing(filename)
         elif printer_command == PrinterCommand.PAUSE_PRINT:
-            elegoo_mars.pause_printing()
+            printer.pause_printing()
         elif printer_command == PrinterCommand.RESUME_PRINT:
-            elegoo_mars.resume_printing()
+            printer.resume_printing()
         elif printer_command == PrinterCommand.CANCEL_PRINT:
-            elegoo_mars.stop_printing()
+            printer.stop_printing()
         elif printer_command == PrinterCommand.REBOOT:
-            elegoo_mars.reboot()
+            printer.reboot()
         return jsonify({"success": True})
